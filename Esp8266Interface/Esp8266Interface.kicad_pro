@@ -45,11 +45,22 @@
         "silk_text_thickness": 0.15,
         "silk_text_upright": false,
         "zones": {
-          "min_clearance": 0.5
+          "min_clearance": 0.0
         }
       },
-      "diff_pair_dimensions": [],
-      "drc_exclusions": [],
+      "diff_pair_dimensions": [
+        {
+          "gap": 0.0,
+          "via_gap": 0.0,
+          "width": 0.0
+        }
+      ],
+      "drc_exclusions": [
+        "lib_footprint_mismatch|145810000|114400000|f27c8bf9-953e-45d1-9a92-fce1c85cb49a|00000000-0000-0000-0000-000000000000",
+        "lib_footprint_mismatch|153710000|91795000|306f6249-3ac6-4507-ac28-fe0718f6693a|00000000-0000-0000-0000-000000000000",
+        "via_dangling|125500000|114500000|d1ef8a94-fdfd-49ed-a7ce-c113ab649354|00000000-0000-0000-0000-000000000000",
+        "via_dangling|170500000|74500000|2e63e0cc-d07c-4bac-9410-703e3e37e5fe|00000000-0000-0000-0000-000000000000"
+      ],
       "meta": {
         "version": 2
       },
@@ -165,8 +176,21 @@
           "td_width_to_size_filter_ratio": 0.9
         }
       ],
-      "track_widths": [],
-      "via_dimensions": [],
+      "track_widths": [
+        0.0,
+        0.5,
+        1.0
+      ],
+      "via_dimensions": [
+        {
+          "diameter": 0.0,
+          "drill": 0.0
+        },
+        {
+          "diameter": 4.0,
+          "drill": 3.0
+        }
+      ],
       "zones_allow_external_fillets": false
     },
     "layer_presets": [],
