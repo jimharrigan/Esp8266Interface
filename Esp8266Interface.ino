@@ -18,17 +18,22 @@
 
 bool startPortalPending = 0;
 bool shouldSaveConfig = false;
+bool lastInputValue = 1;  //assume not triggered on startup
 char mqtt_server[64] = "";
 int mqtt_port = 8883;
 char mqtt_username[32] = "";
 char mqtt_password[40] = "";
 char mqtt_topic[40] = "";
+char trigger_url[128] = "";
+char reset_url[128] = "";
 
 WiFiManagerParameter custom_mqtt_server("server", "mqtt server", "", 63);
 WiFiManagerParameter custom_mqtt_port("port", "mqtt port", "", 6);
 WiFiManagerParameter custom_mqtt_user("user", "mqtt username", "", 31);
 WiFiManagerParameter custom_mqtt_password("password", "mqtt password", "", 39);
 WiFiManagerParameter custom_mqtt_topic("topic", "mqtt topic", "", 39);
+WiFiManagerParameter custom_trigger_url("triggerurl", "Trigger Url", "", 127);
+WiFiManagerParameter custom_reset_url("reseturl", "Reset Url", "", 127);
 
 /**** Secure WiFi Connectivity Initialisation *****/
 WiFiClientSecure espClient;
@@ -40,7 +45,7 @@ PubSubClient client(espClient);
 /************* Connect to MQTT Broker ***********/
 void reconnect() {
     // Loop until we're reconnected
-    while (!client.connected()) {
+    if(!client.connected()) {
         Serial.print("Attempting MQTT connection...");
         String clientId = "ESP8266Client-";   // Create a random client ID
         clientId += String(random(0xffff), HEX);
@@ -54,8 +59,6 @@ void reconnect() {
         else {
             Serial.print("failed, rc=");
             Serial.print(client.state());
-            Serial.println(" try again in 5 seconds");   // Wait 5 seconds before retrying
-            delay(5000);
         }
     }
 }
@@ -71,7 +74,9 @@ void SaveConfig()
     json["mqtt_username"] = mqtt_username;
     json["mqtt_password"] = mqtt_password;
     json["mqtt_topic"] = mqtt_topic;
-
+    json["trigger_url"] = reset_url;
+    json["reset_url"] = reset_url;
+    
     if (!LittleFS.begin()) {
         Serial.println("LittleFS Mount Failed");
         return;
@@ -133,8 +138,15 @@ void LoadConfig()
 
                     strcpy(mqtt_topic, json["mqtt_topic"]);
                     Serial.println(mqtt_topic);
+
+                    strcpy(trigger_url, json["trigger_url"]);
+                    Serial.println(trigger_url);
+
+                    strcpy(reset_url, json["reset_url"]);
+                    Serial.println(reset_url);
                 }
-                else {
+                else
+                {
                     Serial.println("failed to load json config");
                 }
                 configFile.close();
@@ -161,6 +173,7 @@ void LoadConfig()
 void saveParamCallback() {
     Serial.println("saveParamCallback()");
     shouldSaveConfig = true;
+    wm.stopConfigPortal();
 }
 
 /***** Call back Method for Receiving MQTT messages and Switching LED ****/
@@ -190,10 +203,14 @@ void publishMessage(const char* topic, String payload, boolean retained) {
 /**** Application Initialisation Function******/
 void setup() {
 
-    pinMode(start_portal_pin, INPUT);
-    pinMode(input_pin, INPUT);
+    //Set GPIO2 to output low so it can pull GPIO0 low with a switch only after boot.
+    pinMode(2, OUTPUT);
+    digitalWrite(2, 0);
 
-    Serial.begin(115200);
+    pinMode(start_portal_pin, INPUT);
+    pinMode(input_pin, INPUT_PULLUP);
+
+    Serial.begin(115200, SERIAL_8N1, SERIAL_TX_ONLY);
     while (!Serial) delay(1);
     Serial.println("Starting up!");
 
@@ -206,6 +223,8 @@ void setup() {
     custom_mqtt_user.setValue(mqtt_username, 31);
     custom_mqtt_password.setValue(mqtt_password, 39);
     custom_mqtt_topic.setValue(mqtt_topic, 39);
+    custom_trigger_url.setValue(trigger_url, 127);
+    custom_reset_url.setValue(reset_url, 127);
 
     // add all your parameters here
     wm.addParameter(&custom_mqtt_server);
@@ -213,20 +232,20 @@ void setup() {
     wm.addParameter(&custom_mqtt_user);
     wm.addParameter(&custom_mqtt_password);
     wm.addParameter(&custom_mqtt_topic);
+    wm.addParameter(&custom_trigger_url);
+    wm.addParameter(&custom_reset_url);
 
-  // set custom html head content , inside <head>
-  // examples of favicon, or meta tags etc
-  // const char* headhtml = "<link rel='icon' type='image/png' href='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAADQElEQVRoQ+2YjW0VQQyE7Q6gAkgFkAogFUAqgFQAVACpAKiAUAFQAaECQgWECggVGH1PPrRvn3dv9/YkFOksoUhhfzwz9ngvKrc89JbnLxuA/63gpsCmwCADWwkNEji8fVNgotDM7osI/x777x5l9F6JyB8R4eeVql4P0y8yNsjM7KGIPBORp558T04A+CwiH1UVUItiUQmZ2XMReSEiAFgjAPBeVS96D+sCYGaUx4cFbLfmhSpnqnrZuqEJgJnd8cQplVLciAgX//Cf0ToIeOB9wpmloLQAwpnVmAXgdf6pwjpJIz+XNoeZQQZlODV9vhc1Tuf6owrAk/8qIhFbJH7eI3eEzsvydQEICqBEkZwiALfF70HyHPpqScPV5HFjeFu476SkRA0AzOfy4hYwstj2ZkDgaphE7m6XqnoS7Q0BOPs/sw0kDROzjdXcCMFCNwzIy0EcRcOvBACfh4k0wgOmBX4xjfmk4DKTS31hgNWIKBCI8gdzogTgjYjQWFMw+o9LzJoZ63GUmjWm2wGDc7EvDDOj/1IVMIyD9SUAL0WEhpriRlXv5je5S+U1i2N88zdPuoVkeB+ls4SyxCoP3kVm9jsjpEsBLoOBNC5U9SwpGdakFkviuFP1keblATkTENTYcxkzgxTKOI3jyDxqLkQT87pMA++H3XvJBYtsNbBN6vuXq5S737WqHkW1VgMQNXJ0RshMqbbT33sJ5kpHWymzcJjNTeJIymJZtSQd9NHQHS1vodoFoTMkfbJzpRnLzB2vi6BZAJxWaCr+62BC+jzAxVJb3dmmiLzLwZhZNPE5e880Suo2AZgB8e8idxherqUPnT3brBDTlPxO3Z66rVwIwySXugdNd+5ejhqp/+NmgIwGX3Py3QBmlEi54KlwmjkOytQ+iJrLJj23S4GkOeecg8G091no737qvRRdzE+HLALQoMTBbJgBsCj5RSWUlUVJiZ4SOljb05eLFWgoJ5oY6yTyJp62D39jDANoKKcSocPJD5dQYzlFAFZJflUArgTPZKZwLXAnHmerfJquUkKZEgyzqOb5TuDt1P3nwxobqwPocZA11m4A1mBx5IxNgRH21ti7KbAGiyNn3HoF/gJ0w05A8xclpwAAAABJRU5ErkJggg==' />";
-  // const char* headhtml = "<meta name='color-scheme' content='dark light'><style></style><script></script>";
-  // wm.setCustomHeadElement(headhtml);
+    // set custom html head content , inside <head>
+    // examples of favicon, or meta tags etc
+    const char* headhtml = "<meta http-equiv=\"Cache-Control\" content=\"no-cache, no-store, must-revalidate\" /><meta http-equiv=\"Pragma\" content=\"no-cache\" /><meta http-equiv=\"Expires\" content=\"0\" />";
+    wm.setCustomHeadElement(headhtml);
 
-    // set custom html menu content , inside menu item "custom", see setMenu()
-  //  const char* menuhtml = "<form action='/custom' method='get'><button>Custom</button></form><br/>\n";
-  //  wm.setCustomMenuHTML(menuhtml);
+//  set custom html menu content , inside menu item "custom", see setMenu()
+//  const char* menuhtml = "<form action='/custom' method='get'><button>Custom</button></form><br/>\n";
+//  wm.setCustomMenuHTML(menuhtml);
 
-  //  std::vector<const char *> menu = {"wifi","wifinoscan","info","param","custom","close","sep","erase","update","restart","exit"};
-  //  wm.setMenu(menu); // custom menu, pass vector
-
+    std::vector<const char *> menu = {"wifi","info","param","sep","erase","update","exit","restart"};
+    wm.setMenu(menu); // custom menu, pass vector
 
     wm.setSaveParamsCallback(saveParamCallback);
     wm.setDarkMode(true);
@@ -236,12 +255,12 @@ void setup() {
     res = wm.autoConnect("ESP", "1234567890"); // password protected ap
 
     if (!res) {
-        Serial.println("Failed to connect");
+        Serial.println("Failed to connect WiFi");
         // ESP.restart();
     }
     else {
         //if you get here you have connected to the WiFi    
-        Serial.println("connected...yeey :)");
+        Serial.println("WiFi connected.");
     }
 
     espClient.setInsecure();
@@ -275,6 +294,8 @@ void loop() {
         strcpy(mqtt_username, custom_mqtt_user.getValue());
         strcpy(mqtt_password, custom_mqtt_password.getValue());
         strcpy(mqtt_topic, custom_mqtt_topic.getValue());
+        strcpy(trigger_url, custom_trigger_url.getValue());
+        strcpy(reset_url, custom_reset_url.getValue());
 
         SaveConfig();
         shouldSaveConfig = false;
@@ -296,9 +317,20 @@ void loop() {
     char mqtt_message[128];
     serializeJson(doc, mqtt_message);
 
-    publishMessage(mqtt_topic, mqtt_message, true);
+    //publishMessage(mqtt_topic, mqtt_message, true);
 
-    delay(5000);
+    bool inputValue = digitalRead(input_pin);
+    Serial.print(inputValue);
+    Serial.println(inputValue ? " Reset" : " Triggered");
+    if(inputValue != lastInputValue)
+    {
+        lastInputValue = inputValue;
+
+        publishMessage(mqtt_topic, inputValue ? "Reset" : "Triggered", true);        
+
+    }
+
+    delay(500);
 
 }
 
