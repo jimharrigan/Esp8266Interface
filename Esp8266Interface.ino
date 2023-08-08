@@ -7,6 +7,8 @@
 
 #ifdef ESP8266
 #include <ESP8266WiFi.h>
+#include <ESP8266WiFiMulti.h>
+#include <ESP8266HTTPClient.h>
 #else
 #include <WiFi.h>
 #endif
@@ -15,6 +17,8 @@
 #include <ArduinoJson.h>
 #include <PubSubClient.h>
 #include <WiFiClientSecure.h>
+
+ESP8266WiFiMulti WiFiMulti;
 
 bool startPortalPending = 0;
 bool shouldSaveConfig = false;
@@ -47,6 +51,11 @@ void reconnect() {
     // Loop until we're reconnected
     if(!client.connected()) {
         Serial.print("Attempting MQTT connection...");
+        Serial.print("mqtt_username=");
+        Serial.print(mqtt_username);
+        Serial.print("|mqtt_password=");
+        Serial.print(mqtt_password);
+        Serial.print("|");
         String clientId = "ESP8266Client-";   // Create a random client ID
         clientId += String(random(0xffff), HEX);
         // Attempt to connect
@@ -74,7 +83,7 @@ void SaveConfig()
     json["mqtt_username"] = mqtt_username;
     json["mqtt_password"] = mqtt_password;
     json["mqtt_topic"] = mqtt_topic;
-    json["trigger_url"] = reset_url;
+    json["trigger_url"] = trigger_url;
     json["reset_url"] = reset_url;
     
     if (!LittleFS.begin()) {
@@ -194,6 +203,37 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
 }
 
+bool MakeRequest(String url)
+{
+    String result = "";
+
+    if (WiFiMulti.run() == WL_CONNECTED) { //Check the current connection status
+        //Serial.println("WifiMulti.run() is connected");
+        WiFiClient wiFiClient;
+        HTTPClient http;
+
+        http.begin(wiFiClient, url);
+        //Serial.print("Requesting:");
+        //Serial.println(url);
+        int httpCode = http.GET();  //Make the request
+
+        if (httpCode > 0) { //Check for the returning code
+
+            result = http.getString();
+            //Serial.print("result is:");
+            //Serial.println(result);
+        }
+
+        http.end(); //Free the resources
+    }
+
+    if (result.indexOf("OK") > 0)
+    {
+        return true;
+    }
+    return false;
+}
+
 /**** Method for Publishing MQTT Messages **********/
 void publishMessage(const char* topic, String payload, boolean retained) {
     if (client.publish(topic, payload.c_str(), true))
@@ -301,8 +341,11 @@ void loop() {
         shouldSaveConfig = false;
     }
 
-    if (!client.connected()) reconnect(); // check if client is connected
-    client.loop();
+    if(strlen(mqtt_server) > 0 )
+    {
+        if (!client.connected()) reconnect(); // check if MQTT client is connected
+        client.loop();
+    }
 
     float humidity = 99;
     float temperature = 60;
@@ -326,11 +369,27 @@ void loop() {
     {
         lastInputValue = inputValue;
 
-        publishMessage(mqtt_topic, inputValue ? "Reset" : "Triggered", true);        
+        if(strlen(mqtt_server) > 0 )
+        {
+            publishMessage(mqtt_topic, inputValue ? "Reset" : "Triggered", true);
+        }
+
+        if(!inputValue && strlen(trigger_url) > 0 )
+        {
+            Serial.println("Requesting trigger_url");
+            Serial.println(trigger_url);
+            MakeRequest(trigger_url);
+        }
+
+        if(inputValue && strlen(reset_url) > 0 )
+        {
+          Serial.println("Requesting reset_url");
+            MakeRequest(reset_url);
+        }
 
     }
 
-    delay(500);
+    delay(5000);
 
 }
 
