@@ -52,7 +52,6 @@ PubSubClient client(espClient);
 
 /************* Connect to MQTT Broker ***********/
 void reconnect() {
-    // Loop until we're reconnected
     if(!client.connected()) {
         //Serial.print("Attempting MQTT connection...");
         //Serial.print("mqtt_username=");
@@ -196,7 +195,6 @@ void LoadConfig()
 void saveParamCallback() {
     //Serial.println("saveParamCallback()");
     shouldSaveConfig = true;
-    wm.stopConfigPortal();
 }
 
 /***** Call back Method for Receiving MQTT messages and Switching LED ****/
@@ -213,16 +211,12 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         if (incommingMessage.equals("1") || incommingMessage.equals("trigger") )
         {
             //Serial.println("TRIGGER CONTROL!!!");
-            Serial.end();
-            pinMode(output_pin, OUTPUT);
             digitalWrite(output_pin, 1);
             publishMessage(mqtt_topic, "Output 1", true);
         }
         else
         {
           //Serial.println("RESET control");
-          Serial.end();
-          pinMode(output_pin, OUTPUT);
           digitalWrite(output_pin, 0);
           publishMessage(mqtt_topic, "Output 0", true);
         }
@@ -320,7 +314,9 @@ void setup() {
 
     wm.setSaveParamsCallback(saveParamCallback);
     wm.setDarkMode(true);
-    wm.setConfigPortalTimeout(120);
+    wm.setConnectTimeout(20); // how long to try to connect to WiFi for before continuing
+    wm.setConfigPortalTimeout(300);
+    wm.setConfigPortalBlocking(false);
 
     bool res;
     res = wm.autoConnect("ESP", "1234567890"); // password protected ap
@@ -340,12 +336,13 @@ void setup() {
     client.setCallback(mqttCallback);
 
     Serial.end();
+    pinMode(output_pin, OUTPUT);
 }
 
 /******** Main Function *************/
 void loop() {
 
-    //Serial.println("Loop");
+    wm.process(); // avoid delays() in loop when non-blocking and other long running code
 
     if (!digitalRead(start_portal_pin))
     {
@@ -381,21 +378,6 @@ void loop() {
         client.loop();
     }
 
-    float humidity = 99;
-    float temperature = 60;
-
-    DynamicJsonDocument doc(1024);
-
-    doc["deviceId"] = "NodeMCU";
-    doc["siteId"] = "My Demo Lab";
-    doc["humidity"] = 0;
-    doc["temperature"] = digitalRead(input_pin);
-
-    char mqtt_message[128];
-    serializeJson(doc, mqtt_message);
-
-    //publishMessage(mqtt_topic, mqtt_message, true);
-
     bool inputValue = digitalRead(input_pin);
     //Serial.print(inputValue);
     //Serial.println(inputValue ? " Reset" : " Trigger");
@@ -403,7 +385,7 @@ void loop() {
     {
         lastInputValue = inputValue;
 
-        if(strlen(mqtt_server) > 0 )
+        if(client.connected())
         {
             publishMessage(mqtt_topic, inputValue ? "Reset" : "Trigger", true);
         }
@@ -422,10 +404,6 @@ void loop() {
         }
 
     }
-  
-
-    delay(500);
-
 }
 
 
