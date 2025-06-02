@@ -20,32 +20,40 @@
 #include <PubSubClient.h>
 #include <WiFiClientSecure.h>
 
+
+
 ESP8266WiFiMulti WiFiMulti;
 
 bool startPortalPending = 0;
 bool shouldSaveConfig = false;
+bool inputValue = 1;
 bool lastInputValue = 1;  //assume not triggered on startup
 char mqtt_server[64] = "";
 int mqtt_port = 8883;
 char mqtt_username[32] = "";
-char mqtt_password[40] = "";
-char mqtt_topic[40] = "";
-char mqtt_control_topic[40] = "";
-char trigger_url[128] = "";
-char reset_url[128] = "";
+char mqtt_password[32] = "";
+char mqtt_topic[32] = "";
+char mqtt_control_topic[32] = "";
+char trigger_url[64] = "";
+char reset_url[64] = "";
 
 WiFiManagerParameter custom_mqtt_server("server", "mqtt server", "", 63);
 WiFiManagerParameter custom_mqtt_port("port", "mqtt port", "", 6);
 WiFiManagerParameter custom_mqtt_user("user", "mqtt username", "", 31);
-WiFiManagerParameter custom_mqtt_password("password", "mqtt password", "", 39);
-WiFiManagerParameter custom_mqtt_topic("topic", "mqtt topic", "", 39);
-WiFiManagerParameter custom_mqtt_control_topic("control", "mqtt control topic", "", 39);
-WiFiManagerParameter custom_trigger_url("triggerurl", "Trigger Url", "", 127);
-WiFiManagerParameter custom_reset_url("reseturl", "Reset Url", "", 127);
+WiFiManagerParameter custom_mqtt_password("password", "mqtt password", "", 31);
+WiFiManagerParameter custom_mqtt_topic("topic", "mqtt topic", "", 31);
+WiFiManagerParameter custom_mqtt_control_topic("control", "mqtt control topic", "", 31);
+WiFiManagerParameter custom_trigger_url("triggerurl", "Trigger Url", "", 63);
+WiFiManagerParameter custom_reset_url("reseturl", "Reset Url", "", 63);
 
 /**** Secure WiFi Connectivity Initialisation *****/
 WiFiClientSecure espClient;
 WiFiManager wm;
+
+// Checks if motion was detected, sets LED HIGH and starts a timer
+ICACHE_RAM_ATTR void interruptHandler() {
+  inputValue = digitalRead(input_pin);
+}
 
 /**** MQTT Client Initialisation Using WiFi Connection *****/
 PubSubClient client(espClient);
@@ -53,30 +61,30 @@ PubSubClient client(espClient);
 /************* Connect to MQTT Broker ***********/
 void reconnect() {
     if(!client.connected()) {
-        //Serial.print("Attempting MQTT connection...");
-        //Serial.print("mqtt_username=");
-        //Serial.print(mqtt_username);
-        //Serial.print("|mqtt_password=");
-        //Serial.print(mqtt_password);
-        //Serial.print("|");
+        Serial.print("Attempting MQTT connection...");
+        Serial.print("mqtt_username=");
+        Serial.print(mqtt_username);
+        Serial.print("|mqtt_password=");
+        Serial.print(mqtt_password);
+        Serial.print("|");
         String clientId = "ESP8266Client-";   // Create a random client ID
         clientId += String(random(0xffff), HEX);
         // Attempt to connect
         if (client.connect(clientId.c_str(), mqtt_username, mqtt_password)) {
-            //Serial.println("connected");
+            Serial.println("connected");
 
             if(strlen(mqtt_control_topic) > 0)
             {
-                //Serial.print("Going to save->");
-                //Serial.print(mqtt_control_topic);
+                Serial.print("Going to save->");
+                Serial.print(mqtt_control_topic);
                 client.subscribe(mqtt_control_topic);   // subscribe the topics here
-                //Serial.println("<-Done.");
+                Serial.println("<-Done.");
             }
 
         }
         else {
-            //Serial.print("failed, rc=");
-            //Serial.print(client.state());
+            Serial.print("failed, rc=");
+            Serial.print(client.state());
         }
     }
 }
@@ -204,7 +212,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     String incommingMessage = "";
     for (int i = 0; i < length; i++) incommingMessage += (char)payload[i];
 
-    //Serial.println("Message arrived [" + String(topic) + "]" + incommingMessage);
+    Serial.println("Message arrived [" + String(topic) + "]" + incommingMessage);
     incommingMessage.toLowerCase();
     //--- check the incomming message
     if (String(topic).equals(mqtt_control_topic)) {
@@ -259,7 +267,11 @@ bool MakeRequest(String url)
 void publishMessage(const char* topic, String payload, boolean retained) {
     if (client.publish(topic, payload.c_str(), true))
     {
-        //Serial.println("Message publised [" + String(topic) + "]: " + payload);
+        Serial.println("Message publised [" + String(topic) + "]: " + payload);
+    }
+    else
+    {
+      Serial.println("Failed to publish MQTT message.");
     }
 }
 
@@ -284,11 +296,11 @@ void setup() {
     itoa(mqtt_port, mqtt_port_str, 10);
     custom_mqtt_port.setValue(mqtt_port_str, 6);
     custom_mqtt_user.setValue(mqtt_username, 31);
-    custom_mqtt_password.setValue(mqtt_password, 39);
-    custom_mqtt_topic.setValue(mqtt_topic, 39);
-    custom_mqtt_control_topic.setValue(mqtt_control_topic, 39);
-    custom_trigger_url.setValue(trigger_url, 127);
-    custom_reset_url.setValue(reset_url, 127);
+    custom_mqtt_password.setValue(mqtt_password, 31);
+    custom_mqtt_topic.setValue(mqtt_topic, 31);
+    custom_mqtt_control_topic.setValue(mqtt_control_topic, 31);
+    custom_trigger_url.setValue(trigger_url, 63);
+    custom_reset_url.setValue(reset_url, 63);
 
     // add all your parameters here
     wm.addParameter(&custom_mqtt_server);
@@ -319,7 +331,7 @@ void setup() {
     wm.setConfigPortalBlocking(false);
 
     bool res;
-    res = wm.autoConnect("ESP", "1234567890"); // password protected ap
+    //res = wm.autoConnect("ESP", "1234567890"); // password protected ap
 
     if (!res) {
         //Serial.println("Failed to connect WiFi");
@@ -335,8 +347,9 @@ void setup() {
     client.setServer(mqtt_server, mqtt_port);
     client.setCallback(mqttCallback);
 
-    Serial.end();
-    pinMode(output_pin, OUTPUT);
+    //Serial.end();
+    //pinMode(output_pin, OUTPUT);
+    attachInterrupt(digitalPinToInterrupt(input_pin), interruptHandler, CHANGE);
 }
 
 /******** Main Function *************/
@@ -360,7 +373,7 @@ void loop() {
     {
         strcpy(mqtt_server, custom_mqtt_server.getValue());
         mqtt_port = atoi(custom_mqtt_port.getValue());
-        //Serial.println(mqtt_port);
+        Serial.println(mqtt_port);
         strcpy(mqtt_username, custom_mqtt_user.getValue());
         strcpy(mqtt_password, custom_mqtt_password.getValue());
         strcpy(mqtt_topic, custom_mqtt_topic.getValue());
@@ -378,7 +391,6 @@ void loop() {
         client.loop();
     }
 
-    bool inputValue = digitalRead(input_pin);
     //Serial.print(inputValue);
     //Serial.println(inputValue ? " Reset" : " Trigger");
     if(inputValue != lastInputValue)
