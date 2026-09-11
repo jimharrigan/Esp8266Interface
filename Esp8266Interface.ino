@@ -7,9 +7,22 @@
 #define control_pin 2
 #define input_pin 3
 
+// output_pin (GPIO1) is also the UART TX pin, so serial logging and the output
+// cannot both have it. Set DEBUG_SERIAL to 1 to keep logging for the whole run
+// and leave the output dead, or 0 to release the UART at the end of setup() so
+// the output can be driven. Boot messages are printed either way.
+#define DEBUG_SERIAL 0
+
+#if DEBUG_SERIAL
+#define DBG_PRINT(x)   Serial.print(x)
+#define DBG_PRINTLN(x) Serial.println(x)
+#else
+#define DBG_PRINT(x)
+#define DBG_PRINTLN(x)
+#endif
+
 #ifdef ESP8266
 #include <ESP8266WiFi.h>
-#include <ESP8266WiFiMulti.h>
 #include <ESP8266HTTPClient.h>
 #else
 #include <WiFi.h>
@@ -21,8 +34,6 @@
 #include <WiFiClientSecure.h>
 
 
-
-ESP8266WiFiMulti WiFiMulti;
 
 bool startPortalPending = 0;
 bool shouldSaveConfig = false;
@@ -61,30 +72,28 @@ PubSubClient client(espClient);
 /************* Connect to MQTT Broker ***********/
 void reconnect() {
     if(!client.connected()) {
-        Serial.print("Attempting MQTT connection...");
-        Serial.print("mqtt_username=");
-        Serial.print(mqtt_username);
-        Serial.print("|mqtt_password=");
-        Serial.print(mqtt_password);
-        Serial.print("|");
+        DBG_PRINT("Attempting MQTT connection...");
+        DBG_PRINT("mqtt_username=");
+        DBG_PRINT(mqtt_username);
+        DBG_PRINT("|");
         String clientId = "ESP8266Client-";   // Create a random client ID
         clientId += String(random(0xffff), HEX);
         // Attempt to connect
         if (client.connect(clientId.c_str(), mqtt_username, mqtt_password)) {
-            Serial.println("connected");
+            DBG_PRINTLN("connected");
 
             if(strlen(mqtt_control_topic) > 0)
             {
-                Serial.print("Going to save->");
-                Serial.print(mqtt_control_topic);
+                DBG_PRINT("Going to save->");
+                DBG_PRINT(mqtt_control_topic);
                 client.subscribe(mqtt_control_topic);   // subscribe the topics here
-                Serial.println("<-Done.");
+                DBG_PRINTLN("<-Done.");
             }
 
         }
         else {
-            Serial.print("failed, rc=");
-            Serial.print(client.state());
+            DBG_PRINT("failed, rc=");
+            DBG_PRINT(client.state());
         }
     }
 }
@@ -113,12 +122,26 @@ void SaveConfig()
         //Serial.println("failed to open config file for writing");
     }
 
+#if DEBUG_SERIAL
     serializeJson(json, Serial);
+#endif
     serializeJson(json, configFile);
     configFile.close();
     LittleFS.end();
     //end save
 
+}
+
+// Copy one string field out of the config document. The destination is left
+// alone if the key is missing or is not a string, and an over-long value in the
+// file is truncated rather than allowed to run off the end of the buffer.
+static void LoadString(JsonDocument& json, const char* key, char* dest, size_t size)
+{
+    const char* value = json[key];
+    if (value != nullptr)
+    {
+        strlcpy(dest, value, size);
+    }
 }
 
 void LoadConfig()
@@ -138,42 +161,25 @@ void LoadConfig()
             File configFile = LittleFS.open("/config.json", "r");
             if (configFile) {
                 //Serial.println("opened config file");
-                size_t size = configFile.size();
-                // Allocate a buffer to store contents of the file.
-                std::unique_ptr<char[]> buf(new char[size]);
-
-                configFile.readBytes(buf.get(), size);
-
                 DynamicJsonDocument json(1024);
-                auto deserializeError = deserializeJson(json, buf.get());
+                auto deserializeError = deserializeJson(json, configFile);
+#if DEBUG_SERIAL
                 serializeJson(json, Serial);
+#endif
                 if (!deserializeError) {
                     //Serial.println("\nparsed json");
-                    //Serial.println(buf.get());
 
-                    strcpy(mqtt_server, json["mqtt_server"]);
-                    //Serial.println(mqtt_server);
-
-                    mqtt_port = json["mqtt_port"];
-                    //Serial.println(mqtt_port);
-
-                    strcpy(mqtt_username, json["mqtt_username"]);
-                    //Serial.println(mqtt_username);
-
-                    strcpy(mqtt_password, json["mqtt_password"]);
-                    //Serial.println(mqtt_password);
-
-                    strcpy(mqtt_topic, json["mqtt_topic"]);
-                    //Serial.println(mqtt_topic);
-
-                    strcpy(mqtt_control_topic, json["mqtt_control_topic"]);
-                    //Serial.println(mqtt_control_topic);
-
-                    strcpy(trigger_url, json["trigger_url"]);
-                    //Serial.println(trigger_url);
-
-                    strcpy(reset_url, json["reset_url"]);
-                    //Serial.println(reset_url);
+                    // A missing key leaves the field at its compiled-in default,
+                    // so a config.json from an older build loads what it does
+                    // have instead of faulting on the keys it lacks.
+                    LoadString(json, "mqtt_server", mqtt_server, sizeof(mqtt_server));
+                    mqtt_port = json["mqtt_port"] | mqtt_port;
+                    LoadString(json, "mqtt_username", mqtt_username, sizeof(mqtt_username));
+                    LoadString(json, "mqtt_password", mqtt_password, sizeof(mqtt_password));
+                    LoadString(json, "mqtt_topic", mqtt_topic, sizeof(mqtt_topic));
+                    LoadString(json, "mqtt_control_topic", mqtt_control_topic, sizeof(mqtt_control_topic));
+                    LoadString(json, "trigger_url", trigger_url, sizeof(trigger_url));
+                    LoadString(json, "reset_url", reset_url, sizeof(reset_url));
                 }
                 else
                 {
@@ -212,7 +218,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     String incommingMessage = "";
     for (int i = 0; i < length; i++) incommingMessage += (char)payload[i];
 
-    Serial.println("Message arrived [" + String(topic) + "]" + incommingMessage);
+    DBG_PRINTLN("Message arrived [" + String(topic) + "]" + incommingMessage);
     incommingMessage.toLowerCase();
     //--- check the incomming message
     if (String(topic).equals(mqtt_control_topic)) {
@@ -236,8 +242,8 @@ bool MakeRequest(String url)
 {
     String result = "";
 
-    if (WiFiMulti.run() == WL_CONNECTED) { //Check the current connection status
-        ////Serial.println("WifiMulti.run() is connected");
+    if (WiFi.status() == WL_CONNECTED) { //Check the current connection status
+        ////Serial.println("WiFi is connected");
         WiFiClient wiFiClient;
         HTTPClient http;
 
@@ -267,11 +273,11 @@ bool MakeRequest(String url)
 void publishMessage(const char* topic, String payload, boolean retained) {
     if (client.publish(topic, payload.c_str(), true))
     {
-        Serial.println("Message publised [" + String(topic) + "]: " + payload);
+        DBG_PRINTLN("Message publised [" + String(topic) + "]: " + payload);
     }
     else
     {
-      Serial.println("Failed to publish MQTT message.");
+      DBG_PRINTLN("Failed to publish MQTT message.");
     }
 }
 
@@ -330,16 +336,18 @@ void setup() {
     wm.setConfigPortalTimeout(300);
     wm.setConfigPortalBlocking(false);
 
-    bool res;
-    //res = wm.autoConnect("ESP", "1234567890"); // password protected ap
+    // Connect with whatever credentials WiFiManager already has stored. The
+    // config portal stays disabled here on purpose: it is opened on demand from
+    // the button on start_portal_pin, not automatically every time WiFi is
+    // unavailable, so a router outage cannot leave an open AP running unattended.
+    wm.setEnableConfigPortal(false);
 
-    if (!res) {
-        //Serial.println("Failed to connect WiFi");
-        // ESP.restart();
+    if (wm.autoConnect()) {
+        DBG_PRINTLN("WiFi connected.");
     }
     else {
-        //if you get here you have connected to the WiFi    
-        //Serial.println("WiFi connected.");
+        // Not fatal - the board keeps running and the portal button still works.
+        DBG_PRINTLN("Failed to connect WiFi.");
     }
 
     espClient.setInsecure();
@@ -347,8 +355,14 @@ void setup() {
     client.setServer(mqtt_server, mqtt_port);
     client.setCallback(mqttCallback);
 
-    //Serial.end();
-    //pinMode(output_pin, OUTPUT);
+#if !DEBUG_SERIAL
+    // Hand GPIO1 back from the UART so it can drive the output. Nothing is
+    // printed after this point; build with DEBUG_SERIAL 1 to keep logging.
+    Serial.flush();
+    Serial.end();
+    pinMode(output_pin, OUTPUT);
+    digitalWrite(output_pin, 0);
+#endif
     attachInterrupt(digitalPinToInterrupt(input_pin), interruptHandler, CHANGE);
 }
 
@@ -373,7 +387,7 @@ void loop() {
     {
         strcpy(mqtt_server, custom_mqtt_server.getValue());
         mqtt_port = atoi(custom_mqtt_port.getValue());
-        Serial.println(mqtt_port);
+        DBG_PRINTLN(mqtt_port);
         strcpy(mqtt_username, custom_mqtt_user.getValue());
         strcpy(mqtt_password, custom_mqtt_password.getValue());
         strcpy(mqtt_topic, custom_mqtt_topic.getValue());
