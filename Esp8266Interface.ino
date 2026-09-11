@@ -35,7 +35,12 @@
 
 
 
-bool startPortalPending = 0;
+// How long to wait between MQTT connection attempts. The initial value sits one
+// interval in the past so the first attempt is not delayed.
+#define MQTT_RECONNECT_INTERVAL 5000UL
+unsigned long lastReconnectAttempt = (unsigned long)0 - MQTT_RECONNECT_INTERVAL;
+
+bool portalButtonWasPressed = false;
 bool shouldSaveConfig = false;
 bool inputValue = 1;
 bool lastInputValue = 1;  //assume not triggered on startup
@@ -61,8 +66,8 @@ WiFiManagerParameter custom_reset_url("reseturl", "Reset Url", "", 63);
 WiFiClientSecure espClient;
 WiFiManager wm;
 
-// Checks if motion was detected, sets LED HIGH and starts a timer
-ICACHE_RAM_ATTR void interruptHandler() {
+// Records the input level on every edge; the main loop acts on the change.
+IRAM_ATTR void interruptHandler() {
   inputValue = digitalRead(input_pin);
 }
 
@@ -216,7 +221,7 @@ void saveParamCallback() {
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   
     String incommingMessage = "";
-    for (int i = 0; i < length; i++) incommingMessage += (char)payload[i];
+    for (unsigned int i = 0; i < length; i++) incommingMessage += (char)payload[i];
 
     DBG_PRINTLN("Message arrived [" + String(topic) + "]" + incommingMessage);
     incommingMessage.toLowerCase();
@@ -271,7 +276,7 @@ bool MakeRequest(String url)
 
 /**** Method for Publishing MQTT Messages **********/
 void publishMessage(const char* topic, String payload, boolean retained) {
-    if (client.publish(topic, payload.c_str(), true))
+    if (client.publish(topic, payload.c_str(), retained))
     {
         DBG_PRINTLN("Message publised [" + String(topic) + "]: " + payload);
     }
@@ -371,17 +376,19 @@ void loop() {
 
     wm.process(); // avoid delays() in loop when non-blocking and other long running code
 
-    if (!digitalRead(start_portal_pin))
+    // Act on the press itself rather than on every pass while the button is
+    // held, and never on top of a portal that is already up. The return value is
+    // not a success flag here: the portal is non-blocking, so startConfigPortal()
+    // returns the not-yet-connected state immediately.
+    bool portalButtonPressed = !digitalRead(start_portal_pin);
+
+    if (portalButtonPressed && !portalButtonWasPressed && !wm.getConfigPortalActive())
     {
-        if (!wm.startConfigPortal("ESP", "1234567890")) {
-            //Serial.println("failed to connect and hit timeout");
-        }
-        else
-        {
-            //Serial.println("Portal Started");
-            startPortalPending = false;
-        }
+        DBG_PRINTLN("Starting config portal.");
+        wm.startConfigPortal("ESP", "1234567890");
     }
+
+    portalButtonWasPressed = portalButtonPressed;
 
     if (shouldSaveConfig)
     {
@@ -407,11 +414,25 @@ void loop() {
         {
             client.disconnect();
         }
+
+        // Reconnect on the next pass rather than after the backoff interval, so
+        // saving settings visibly takes effect. Backdating from millis() keeps
+        // this correct across the 49-day rollover.
+        lastReconnectAttempt = millis() - MQTT_RECONNECT_INTERVAL;
     }
 
     if(strlen(mqtt_server) > 0 )
     {
-        if (!client.connected()) reconnect(); // check if MQTT client is connected
+        if (!client.connected())
+        {
+            // Space the attempts out, so an unreachable broker is retried every
+            // few seconds rather than as fast as connect() can time out.
+            if (millis() - lastReconnectAttempt >= MQTT_RECONNECT_INTERVAL)
+            {
+                lastReconnectAttempt = millis();
+                reconnect();
+            }
+        }
         client.loop();
     }
 

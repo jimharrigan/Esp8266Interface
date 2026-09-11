@@ -142,19 +142,20 @@ MQTT runs over `WiFiClientSecure`, but `setInsecure()` is called, so the server
 certificate is not validated. Credentials are stored in plaintext in the filesystem.
 Treat this as suitable for a trusted LAN, not the open internet.
 
-## Known issues
+## Notes
 
-These are current limitations in the sketch, not setup mistakes:
+The sketch compiles clean — no warnings — against ESP8266 core 3.1.2 with
+`--warnings all`, in both `DEBUG_SERIAL` configurations.
 
-- The config portal is started from inside `loop()` on every iteration the button is
-  held down, and `publishMessage()` ignores its `retained` argument and always publishes
-  retained.
-- `reconnect()` retries on every pass through `loop()` with no backoff, so an
-  unreachable broker is retried as fast as the connection attempt times out.
+A few behaviours are deliberate rather than oversights:
 
-The sketch compiles with four warnings, all long-standing: an unused `retained`
-parameter, a signed/unsigned comparison in `mqttCallback()`, and two for
-`ICACHE_RAM_ATTR`, which the ESP8266 core has deprecated in favour of `IRAM_ATTR`.
+- The config portal opens on the button's falling edge, not while it is held, and not
+  on top of a portal that is already running. It never opens by itself on a failed
+  connection.
+- MQTT connection attempts are spaced `MQTT_RECONNECT_INTERVAL` (5 s) apart. Saving
+  settings in the portal resets that, so a new broker is tried on the next pass.
+- `publishMessage()` honours its `retained` argument; all three call sites pass `true`,
+  so every status message is retained.
 
 ## License
 
