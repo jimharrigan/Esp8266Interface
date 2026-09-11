@@ -123,7 +123,9 @@ standard WiFi and info pages plus a `param` page with these fields:
 
 Settings are written to `/config.json` in LittleFS and reloaded at boot. The portal
 timeout is 300 s and runs non-blocking, so the rest of the loop keeps running while it
-is open.
+is open. Saving MQTT settings takes effect immediately: the client is re-pointed at the
+new broker and any live session is dropped, so the next reconnect picks up the new
+server, port, credentials and control topic without a restart.
 
 ### Messages
 
@@ -144,11 +146,11 @@ Treat this as suitable for a trusted LAN, not the open internet.
 
 These are current limitations in the sketch, not setup mistakes:
 
-- **MQTT settings need a reboot.** `client.setServer()` is only called in `setup()`, so
-  changing the server or port in the portal does not take effect until a restart.
 - The config portal is started from inside `loop()` on every iteration the button is
   held down, and `publishMessage()` ignores its `retained` argument and always publishes
   retained.
+- `reconnect()` retries on every pass through `loop()` with no backoff, so an
+  unreachable broker is retried as fast as the connection attempt times out.
 
 The sketch compiles with four warnings, all long-standing: an unused `retained`
 parameter, a signed/unsigned comparison in `mqttCallback()`, and two for

@@ -397,6 +397,16 @@ void loop() {
 
         SaveConfig();
         shouldSaveConfig = false;
+
+        // Re-point the client at what was just saved. setServer() keeps the port
+        // by value, so a port change is invisible without this call, and drop any
+        // live session so the next reconnect() picks up the new broker,
+        // credentials and control topic instead of waiting for a reboot.
+        client.setServer(mqtt_server, mqtt_port);
+        if (client.connected())
+        {
+            client.disconnect();
+        }
     }
 
     if(strlen(mqtt_server) > 0 )
