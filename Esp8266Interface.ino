@@ -46,10 +46,22 @@ unsigned long lastReconnectAttempt = (unsigned long)0 - MQTT_RECONNECT_INTERVAL;
 #define URL_REPEAT_INTERVAL 600000UL
 unsigned long lastUrlRequest = 0;
 
+// A contact closing or opening rattles for a few milliseconds, and every one of
+// those edges raises an interrupt. The level has to hold steady for this long
+// before the main loop treats it as a real change, so one flick of the input
+// produces one message instead of a burst of them.
+#define DEBOUNCE_INTERVAL 50UL
+
 bool portalButtonWasPressed = false;
 bool shouldSaveConfig = false;
+// The debounced level the rest of the sketch acts on; assume not triggered on
+// startup.
 bool inputValue = 1;
-bool lastInputValue = 1;  //assume not triggered on startup
+// Written by the interrupt handler on every edge, bounces included, along with
+// the time that edge arrived. Both are volatile because the main loop reads what
+// the handler writes.
+volatile bool rawInputValue = 1;
+volatile unsigned long lastEdgeTime = 0;
 char mqtt_server[64] = "";
 int mqtt_port = 8883;
 char mqtt_username[32] = "";
@@ -72,9 +84,12 @@ WiFiManagerParameter custom_reset_url("reseturl", "Reset Url", "", 63);
 WiFiClientSecure espClient;
 WiFiManager wm;
 
-// Records the input level on every edge; the main loop acts on the change.
+// Records the input level and the moment it changed on every edge. The main loop
+// does the debouncing, so this stays short. millis() is IRAM_ATTR in the esp8266
+// core and is safe to call from here.
 IRAM_ATTR void interruptHandler() {
-  inputValue = digitalRead(input_pin);
+  rawInputValue = digitalRead(input_pin);
+  lastEdgeTime = millis();
 }
 
 /**** MQTT Client Initialisation Using WiFi Connection *****/
@@ -465,9 +480,21 @@ void loop() {
 
     //Serial.print(inputValue);
     //Serial.println(inputValue ? " Reset" : " Trigger");
-    if(inputValue != lastInputValue)
+    // Take a consistent pair: an edge landing between these two reads would
+    // otherwise pair a new level with the previous edge's timestamp and let a
+    // bounce through.
+    noInterrupts();
+    bool pendingValue = rawInputValue;
+    unsigned long pendingEdgeTime = lastEdgeTime;
+    interrupts();
+
+    // Accept the new level only once it has sat still for the debounce interval.
+    // While the input is still rattling every bounce pushes lastEdgeTime forward
+    // and restarts the wait, so nothing is sent until it settles, and the level
+    // that gets reported is the one it settled on.
+    if(pendingValue != inputValue && millis() - pendingEdgeTime >= DEBOUNCE_INTERVAL)
     {
-        lastInputValue = inputValue;
+        inputValue = pendingValue;
 
         if(client.connected())
         {
