@@ -40,6 +40,12 @@
 #define MQTT_RECONNECT_INTERVAL 5000UL
 unsigned long lastReconnectAttempt = (unsigned long)0 - MQTT_RECONNECT_INTERVAL;
 
+// The trigger/reset urls are re-sent this often even when the input has not
+// changed, so the far end keeps hearing the current state. Leaving the timer at
+// zero puts the first repeat one interval after startup.
+#define URL_REPEAT_INTERVAL 600000UL
+unsigned long lastUrlRequest = 0;
+
 bool portalButtonWasPressed = false;
 bool shouldSaveConfig = false;
 bool inputValue = 1;
@@ -107,7 +113,7 @@ void SaveConfig()
 {
     //Serial.println("Saving config...");
 
-    DynamicJsonDocument json(1024);
+    JsonDocument json;
 
     json["mqtt_server"] = mqtt_server;
     json["mqtt_port"] = mqtt_port;
@@ -166,7 +172,7 @@ void LoadConfig()
             File configFile = LittleFS.open("/config.json", "r");
             if (configFile) {
                 //Serial.println("opened config file");
-                DynamicJsonDocument json(1024);
+                JsonDocument json;
                 auto deserializeError = deserializeJson(json, configFile);
 #if DEBUG_SERIAL
                 serializeJson(json, Serial);
@@ -272,6 +278,27 @@ bool MakeRequest(String url)
         return true;
     }
     return false;
+}
+
+// Requests the url matching the current input level and restarts the repeat
+// timer, so a repeat always lands a full interval after the last request,
+// whether that came from an edge or from the timer itself.
+void SendStateUrl()
+{
+    lastUrlRequest = millis();
+
+    if(!inputValue && strlen(trigger_url) > 0 )
+    {
+        //Serial.println("Requesting trigger_url");
+        //Serial.println(trigger_url);
+        MakeRequest(trigger_url);
+    }
+
+    if(inputValue && strlen(reset_url) > 0 )
+    {
+        //Serial.println("Requesting reset_url");
+        MakeRequest(reset_url);
+    }
 }
 
 /**** Method for Publishing MQTT Messages **********/
@@ -447,19 +474,14 @@ void loop() {
             publishMessage(mqtt_topic, inputValue ? "Reset" : "Trigger", true);
         }
 
-        if(!inputValue && strlen(trigger_url) > 0 )
-        {
-            //Serial.println("Requesting trigger_url");
-            //Serial.println(trigger_url);
-            MakeRequest(trigger_url);
-        }
-
-        if(inputValue && strlen(reset_url) > 0 )
-        {
-          //Serial.println("Requesting reset_url");
-            MakeRequest(reset_url);
-        }
-
+        SendStateUrl();
+    }
+    else if (millis() - lastUrlRequest >= URL_REPEAT_INTERVAL)
+    {
+        // No edge for a while, so repeat whichever url matches the current
+        // state. Comparing the difference keeps this correct across the 49-day
+        // millis() rollover.
+        SendStateUrl();
     }
 }
 
