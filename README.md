@@ -101,9 +101,11 @@ reset. Doing this with the module out of the socket avoids back-feeding the `Rly
 ## Configuration
 
 At boot the board tries the WiFi credentials WiFiManager has stored, giving up after
-20 s. Failing to connect is not fatal — it keeps running and keeps retrying MQTT — and
-it deliberately does **not** open the config portal on its own, so a router outage
-cannot leave an access point running unattended in someone's wall.
+20 s. Failing to connect is not fatal — it keeps running while the ESP8266 keeps
+retrying WiFi in the background — and it deliberately does **not** open the config
+portal on its own, so a router outage cannot leave an access point running unattended
+in someone's wall. If WiFi stays down for 5 minutes the board reboots (see
+[Failure handling](#failure-handling)).
 
 The portal is opened on demand instead. Press the button on `J3` and the board comes up
 as an access point named **`ESP`** with the password **`1234567890`**, which is also how
@@ -118,8 +120,8 @@ standard WiFi and info pages plus a `param` page with these fields:
 | mqtt password | `mqtt_password` | |
 | mqtt topic | `mqtt_topic` | Status topic the board publishes to |
 | mqtt control topic | `mqtt_control_topic` | Subscribed topic for output commands; leave empty to skip |
-| Trigger Url | `trigger_url` | Fetched when the input goes low |
-| Reset Url | `reset_url` | Fetched when the input goes high |
+| Trigger Url | `trigger_url` | Fetched when the input goes low, at boot if it is low, and every 10 minutes while it stays low |
+| Reset Url | `reset_url` | Fetched when the input goes high, at boot if it is high, and every 10 minutes while it stays high |
 
 Settings are written to `/config.json` in LittleFS and reloaded at boot. The portal
 timeout is 300 s and runs non-blocking, so the rest of the loop keeps running while it
@@ -131,16 +133,38 @@ server, port, credentials and control topic without a restart.
 
 | Direction | Topic | Payload |
 | --- | --- | --- |
-| Published | `mqtt_topic` | `Trigger` when the input goes low, `Reset` when it goes high |
+| Published | `mqtt_topic` | `Trigger` when the input goes low, `Reset` when it goes high, and the current state each time the broker connection comes up |
 | Published | `mqtt_topic` | `Output 1` / `Output 0` after a control message |
 | Subscribed | `mqtt_control_topic` | `1` or `trigger` turns the output on; any other payload turns it off |
 
-Payload matching is case-insensitive. An HTTP request counts as successful only if the
-response body contains `OK`, though the result is currently discarded by the caller.
+Payload matching is case-insensitive. An HTTP request counts as successful if the
+server answers with any 2xx status; the response body is not read.
 
 MQTT runs over `WiFiClientSecure`, but `setInsecure()` is called, so the server
 certificate is not validated. Credentials are stored in plaintext in the filesystem.
 Treat this as suitable for a trusted LAN, not the open internet.
+
+### Failure handling
+
+The input is read at boot, so its state is sent even if it never changes: the matching
+URL on the first pass through the loop, and the MQTT status as soon as the broker
+connects.
+
+- **URL request fails** (no WiFi, no connection, or a non-2xx reply): the next attempt
+  is due 30 s later instead of 10 minutes, and when it comes due the board reboots
+  instead. After the reboot it reads the input again and makes a fresh attempt.
+- **WiFi down for 5 minutes:** the board reboots. The timer counts from power-up if WiFi
+  never connects, so a board with no stored credentials reboots every 5 minutes until
+  the portal is used.
+- **MQTT disconnected:** reconnects every 5 s, but only while WiFi is up. MQTT failures
+  never cause a reboot.
+
+Neither reboot happens while the config portal is open, and the 5-minute WiFi timer
+starts again when the portal closes. A reboot turns the output off until a control
+message arrives; a retained control message restores it as soon as MQTT reconnects.
+
+On the ESP8266 the first software restart after a serial upload can hang in the
+bootloader, so power-cycle the board once after flashing.
 
 ## Notes
 
@@ -152,8 +176,9 @@ A few behaviours are deliberate rather than oversights:
 - The config portal opens on the button's falling edge, not while it is held, and not
   on top of a portal that is already running. It never opens by itself on a failed
   connection.
-- MQTT connection attempts are spaced `MQTT_RECONNECT_INTERVAL` (5 s) apart. Saving
-  settings in the portal resets that, so a new broker is tried on the next pass.
+- MQTT connection attempts are spaced `MQTT_RECONNECT_INTERVAL` (5 s) apart and
+  skipped while WiFi is down, so they do not stall the loop. Saving settings in the
+  portal resets that, so a new broker is tried on the next pass.
 - `publishMessage()` honours its `retained` argument; all three call sites pass `true`,
   so every status message is retained.
 

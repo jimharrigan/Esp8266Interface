@@ -41,10 +41,23 @@
 unsigned long lastReconnectAttempt = (unsigned long)0 - MQTT_RECONNECT_INTERVAL;
 
 // The trigger/reset urls are re-sent this often even when the input has not
-// changed, so the far end keeps hearing the current state. Leaving the timer at
-// zero puts the first repeat one interval after startup.
+// changed, so the far end keeps hearing the current state. setup() backdates the
+// timer so the first request goes out as soon as loop() starts.
 #define URL_REPEAT_INTERVAL 600000UL
 unsigned long lastUrlRequest = 0;
+
+// A request that does not get through (WiFi down, server unreachable, or a
+// non-2xx reply) is followed up after this much shorter wait rather than at the
+// next ten-minute repeat. The follow-up reboots the board before trying again;
+// see SendStateUrl().
+#define URL_RETRY_INTERVAL 30000UL
+unsigned long urlRequestInterval = URL_REPEAT_INTERVAL;
+bool lastUrlRequestFailed = false;
+
+// The board reboots once WiFi has been down for this long. The timer starts at
+// zero, so a board that never connects after power-up counts from boot.
+#define WIFI_DOWN_REBOOT_INTERVAL 300000UL
+unsigned long lastWifiConnected = 0;
 
 // A contact closing or opening rattles for a few milliseconds, and every one of
 // those edges raises an interrupt. The level has to hold steady for this long
@@ -54,8 +67,8 @@ unsigned long lastUrlRequest = 0;
 
 bool portalButtonWasPressed = false;
 bool shouldSaveConfig = false;
-// The debounced level the rest of the sketch acts on; assume not triggered on
-// startup.
+// The debounced level the rest of the sketch acts on. setup() replaces this with
+// the real level before loop() starts.
 bool inputValue = 1;
 // Written by the interrupt handler on every edge, bounces included, along with
 // the time that edge arrived. Both are volatile because the main loop reads what
@@ -115,6 +128,10 @@ void reconnect() {
                 client.subscribe(mqtt_control_topic);   // subscribe the topics here
                 DBG_PRINTLN("<-Done.");
             }
+
+            // Anything that changed while the connection was down was never
+            // published, so bring the retained state up to date now.
+            publishMessage(mqtt_topic, inputValue ? "Reset" : "Trigger", true);
 
         }
         else {
@@ -264,9 +281,12 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
 }
 
+// Returns true when the server answered with a 2xx status. The body is not
+// looked at, so any endpoint that accepts the request counts as a success; no
+// WiFi, a connection failure (negative httpCode) or a non-2xx status is a failure.
 bool MakeRequest(String url)
 {
-    String result = "";
+    bool success = false;
 
     if (WiFi.status() == WL_CONNECTED) { //Check the current connection status
         ////Serial.println("WiFi is connected");
@@ -278,42 +298,46 @@ bool MakeRequest(String url)
         ////Serial.println(url);
         int httpCode = http.GET();  //Make the request
 
-        if (httpCode > 0) { //Check for the returning code
-
-            result = http.getString();
-            ////Serial.print("result is:");
-            ////Serial.println(result);
-        }
+        success = httpCode >= 200 && httpCode < 300;
 
         http.end(); //Free the resources
     }
 
-    if (result.indexOf("OK") > 0)
-    {
-        return true;
-    }
-    return false;
+    return success;
 }
 
 // Requests the url matching the current input level and restarts the repeat
 // timer, so a repeat always lands a full interval after the last request,
-// whether that came from an edge or from the timer itself.
+// whether that came from an edge or from the timer itself. A failed request
+// shortens the wait to the retry interval.
+//
+// If the previous request failed, the board is rebooted instead of trying
+// again, clearing whatever state the WiFi stack or network client is stuck in.
+// The flag lives in RAM, so the reboot clears it; setup() then reads the input
+// and the first pass through loop() makes a real attempt. That attempt reboots
+// only if it fails and another retry interval goes by. The reboot is skipped
+// while the config portal is up, so it cannot be closed in the middle of use.
 void SendStateUrl()
 {
+    if (lastUrlRequestFailed && !wm.getConfigPortalActive())
+    {
+        ESP.restart();
+    }
+
     lastUrlRequest = millis();
 
-    if(!inputValue && strlen(trigger_url) > 0 )
+    const char* url = inputValue ? reset_url : trigger_url;
+
+    if(strlen(url) == 0)
     {
-        //Serial.println("Requesting trigger_url");
-        //Serial.println(trigger_url);
-        MakeRequest(trigger_url);
+        lastUrlRequestFailed = false;
+        urlRequestInterval = URL_REPEAT_INTERVAL;
+        return;
     }
 
-    if(inputValue && strlen(reset_url) > 0 )
-    {
-        //Serial.println("Requesting reset_url");
-        MakeRequest(reset_url);
-    }
+    //Serial.println(inputValue ? "Requesting reset_url" : "Requesting trigger_url");
+    lastUrlRequestFailed = !MakeRequest(url);
+    urlRequestInterval = lastUrlRequestFailed ? URL_RETRY_INTERVAL : URL_REPEAT_INTERVAL;
 }
 
 /**** Method for Publishing MQTT Messages **********/
@@ -411,6 +435,21 @@ void setup() {
     digitalWrite(output_pin, 0);
 #endif
     attachInterrupt(digitalPinToInterrupt(input_pin), interruptHandler, CHANGE);
+
+    // Start from the level the input is actually at. Without this a contact that
+    // is already closed at power-up raises no edge, so it would never be
+    // reported. Reading after attaching, with interrupts held off, means an edge
+    // cannot slip in between the read and the handler taking over.
+    noInterrupts();
+    rawInputValue = digitalRead(input_pin);
+    inputValue = rawInputValue;
+    interrupts();
+
+    // Send the state url on the first pass through loop() rather than one full
+    // interval after startup. If WiFi is not up yet the request fails and the
+    // retry interval takes over until it gets through. The MQTT state is
+    // published by reconnect() once the broker connection comes up.
+    lastUrlRequest = millis() - URL_REPEAT_INTERVAL;
 }
 
 /******** Main Function *************/
@@ -431,6 +470,20 @@ void loop() {
     }
 
     portalButtonWasPressed = portalButtonPressed;
+
+    // Reboot once WiFi has been gone for too long, in case the WiFi stack has
+    // wedged rather than the network simply being down. An open config portal
+    // counts as connected, so the portal is never closed mid-use and a full
+    // interval is allowed after it closes. Comparing the difference keeps this
+    // correct across the 49-day millis() rollover.
+    if (WiFi.status() == WL_CONNECTED || wm.getConfigPortalActive())
+    {
+        lastWifiConnected = millis();
+    }
+    else if (millis() - lastWifiConnected >= WIFI_DOWN_REBOOT_INTERVAL)
+    {
+        ESP.restart();
+    }
 
     if (shouldSaveConfig)
     {
@@ -468,8 +521,12 @@ void loop() {
         if (!client.connected())
         {
             // Space the attempts out, so an unreachable broker is retried every
-            // few seconds rather than as fast as connect() can time out.
-            if (millis() - lastReconnectAttempt >= MQTT_RECONNECT_INTERVAL)
+            // few seconds rather than as fast as connect() can time out. Without
+            // WiFi an attempt cannot succeed and would only stall the loop, so
+            // hold off; the timer is left alone, so the first pass after WiFi
+            // returns tries straight away.
+            if (WiFi.status() == WL_CONNECTED &&
+                millis() - lastReconnectAttempt >= MQTT_RECONNECT_INTERVAL)
             {
                 lastReconnectAttempt = millis();
                 reconnect();
@@ -503,11 +560,11 @@ void loop() {
 
         SendStateUrl();
     }
-    else if (millis() - lastUrlRequest >= URL_REPEAT_INTERVAL)
+    else if (millis() - lastUrlRequest >= urlRequestInterval)
     {
         // No edge for a while, so repeat whichever url matches the current
-        // state. Comparing the difference keeps this correct across the 49-day
-        // millis() rollover.
+        // state, or retry sooner if the last request failed. Comparing the
+        // difference keeps this correct across the 49-day millis() rollover.
         SendStateUrl();
     }
 }
