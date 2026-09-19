@@ -2,7 +2,8 @@
 
 A WiFi bridge between a dry-contact (or opto-isolated) signal and MQTT / HTTP, built
 around an ESP-01 module. It reports the state of an external input to an MQTT topic
-and/or a pair of webhook URLs, and drives a relay output in response to MQTT messages.
+and/or a pair of webhook URLs, and drives a relay output in response to MQTT messages
+or a polled URL.
 
 Typical use is retrofitting network connectivity onto existing wired equipment —
 a doorbell transformer, an alarm panel output, a gate contact — without modifying it.
@@ -31,6 +32,11 @@ and:
 `trigger` drives `GPIO1` high; anything else drives it low. `GPIO1` gates a 2N7000
 low-side switch on the `Rly` header, so this is intended to energise a relay coil. The
 new state is echoed back to the status topic as `Output 1` / `Output 0`.
+
+The same output can instead — or as well — be driven by polling. If a control URL is
+configured, the board fetches it every 2 s and looks at the reply: a body containing
+`Trigger` closes the relay, one containing `Reset` opens it. This suits a far end that
+has no MQTT broker and cannot reach in to the board, only be asked.
 
 ## Hardware
 
@@ -122,6 +128,7 @@ standard WiFi and info pages plus a `param` page with these fields:
 | mqtt control topic | `mqtt_control_topic` | Subscribed topic for output commands; leave empty to skip |
 | Trigger Url | `trigger_url` | Fetched when the input goes low, at boot if it is low, and every 10 minutes while it stays low |
 | Reset Url | `reset_url` | Fetched when the input goes high, at boot if it is high, and every 10 minutes while it stays high |
+| Control Url | `control_url` | Polled every 2 s for the output state; leave empty to skip |
 
 Settings are written to `/config.json` in LittleFS and reloaded at boot. The portal
 timeout is 300 s and runs non-blocking, so the rest of the loop keeps running while it
@@ -138,7 +145,36 @@ server, port, credentials and control topic without a restart.
 | Subscribed | `mqtt_control_topic` | `1` or `trigger` turns the output on; any other payload turns it off |
 
 Payload matching is case-insensitive. An HTTP request counts as successful if the
-server answers with any 2xx status; the response body is not read.
+server answers with any 2xx status; the response body is only read for the control URL.
+
+### Control URL
+
+A control URL is polled every 2 s and the reply decides where the output sits:
+
+| Reply body | Effect |
+| --- | --- |
+| contains `Trigger` | Output on — relay energised |
+| contains `Reset` | Output off |
+| contains both | Treated as `Trigger` |
+| contains neither | Output left as it is |
+| request failed | Output left as it is |
+
+The match is case-insensitive and anywhere in the body, so a page carrying other
+markup around the word still works. Only `Output 1` / `Output 0` transitions are
+published to the status topic — a poll that finds the same state as last time is
+silent, so a 2 s poll does not flood the broker.
+
+Nothing about the poll reboots the board: a control URL that stops answering leaves
+the relay where it was rather than dropping it, and the next poll tries again. The
+request timeout is 1.5 s, under the 2 s interval, so an unreachable server cannot
+stall the loop for longer than one period, and the interval is measured from the end
+of each request rather than the start. The poll runs on the first pass through the
+loop, so a reboot picks the output back up immediately instead of waiting, and is
+held off entirely while the config portal is open, so a bad URL can still be
+corrected.
+
+Note that the request is plain HTTP over `WiFiClient` — an `https://` control URL will
+not work, and the reply is trusted as-is.
 
 MQTT runs over `WiFiClientSecure`, but `setInsecure()` is called, so the server
 certificate is not validated. Credentials are stored in plaintext in the filesystem.
@@ -161,7 +197,8 @@ connects.
 
 Neither reboot happens while the config portal is open, and the 5-minute WiFi timer
 starts again when the portal closes. A reboot turns the output off until a control
-message arrives; a retained control message restores it as soon as MQTT reconnects.
+message arrives; a retained control message restores it as soon as MQTT reconnects, and
+a control URL restores it on the first poll.
 
 On the ESP8266 the first software restart after a serial upload can hang in the
 bootloader, so power-cycle the board once after flashing.
@@ -179,8 +216,13 @@ A few behaviours are deliberate rather than oversights:
 - MQTT connection attempts are spaced `MQTT_RECONNECT_INTERVAL` (5 s) apart and
   skipped while WiFi is down, so they do not stall the loop. Saving settings in the
   portal resets that, so a new broker is tried on the next pass.
-- `publishMessage()` honours its `retained` argument; all three call sites pass `true`,
-  so every status message is retained.
+- `publishMessage()` honours its `retained` argument; every call site passes `true`, so
+  every status message is retained.
+- Both output paths go through `SetOutput()`, so they share one idea of where the
+  output is. An MQTT command is acknowledged on the status topic whether or not it
+  changed anything; a control URL poll only publishes when the level actually moves.
+- If both a control topic and a control URL are configured, they fight: whichever
+  spoke last wins, and the URL speaks every 2 s. Configure one or the other.
 
 ## License
 

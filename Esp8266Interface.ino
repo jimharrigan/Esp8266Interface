@@ -54,6 +54,15 @@ unsigned long lastUrlRequest = 0;
 unsigned long urlRequestInterval = URL_REPEAT_INTERVAL;
 bool lastUrlRequestFailed = false;
 
+// How often the control url is polled, when one is configured. A poll is a
+// blocking request, so the timeout is held below the interval to stop an
+// unreachable server from stalling the loop for longer than one period.
+// setup() backdates the timer so the first poll goes out as soon as loop()
+// starts, which is what picks the output back up after a reboot.
+#define CONTROL_URL_INTERVAL 2000UL
+#define CONTROL_URL_TIMEOUT 1500UL
+unsigned long lastControlUrlRequest = 0;
+
 // The board reboots once WiFi has been down for this long. The timer starts at
 // zero, so a board that never connects after power-up counts from boot.
 #define WIFI_DOWN_REBOOT_INTERVAL 300000UL
@@ -75,6 +84,9 @@ bool inputValue = 1;
 // the handler writes.
 volatile bool rawInputValue = 1;
 volatile unsigned long lastEdgeTime = 0;
+// The level the output is being held at. Tracked so the polled control url can
+// tell a real change from a repeat of the level it already set.
+bool outputValue = 0;
 char mqtt_server[64] = "";
 int mqtt_port = 8883;
 char mqtt_username[32] = "";
@@ -83,6 +95,7 @@ char mqtt_topic[32] = "";
 char mqtt_control_topic[32] = "";
 char trigger_url[64] = "";
 char reset_url[64] = "";
+char control_url[64] = "";
 
 WiFiManagerParameter custom_mqtt_server("server", "mqtt server", "", 63);
 WiFiManagerParameter custom_mqtt_port("port", "mqtt port", "", 6);
@@ -92,6 +105,7 @@ WiFiManagerParameter custom_mqtt_topic("topic", "mqtt topic", "", 31);
 WiFiManagerParameter custom_mqtt_control_topic("control", "mqtt control topic", "", 31);
 WiFiManagerParameter custom_trigger_url("triggerurl", "Trigger Url", "", 63);
 WiFiManagerParameter custom_reset_url("reseturl", "Reset Url", "", 63);
+WiFiManagerParameter custom_control_url("controlurl", "Control Url", "", 63);
 
 /**** Secure WiFi Connectivity Initialisation *****/
 WiFiClientSecure espClient;
@@ -155,6 +169,7 @@ void SaveConfig()
     json["mqtt_control_topic"] = mqtt_control_topic;
     json["trigger_url"] = trigger_url;
     json["reset_url"] = reset_url;
+    json["control_url"] = control_url;
     
     if (!LittleFS.begin()) {
         //Serial.println("LittleFS Mount Failed");
@@ -223,6 +238,7 @@ void LoadConfig()
                     LoadString(json, "mqtt_control_topic", mqtt_control_topic, sizeof(mqtt_control_topic));
                     LoadString(json, "trigger_url", trigger_url, sizeof(trigger_url));
                     LoadString(json, "reset_url", reset_url, sizeof(reset_url));
+                    LoadString(json, "control_url", control_url, sizeof(control_url));
                 }
                 else
                 {
@@ -254,6 +270,24 @@ void saveParamCallback() {
     shouldSaveConfig = true;
 }
 
+// Drives the output and echoes the new level to the status topic. Both control
+// paths go through here so they share one idea of where the output is. An
+// explicit MQTT command is acknowledged whether or not it changed anything; the
+// polled control url repeats the same level every couple of seconds, so it only
+// publishes when the level actually moves.
+void SetOutput(bool value, bool alwaysPublish)
+{
+    bool changed = value != outputValue;
+
+    outputValue = value;
+    digitalWrite(output_pin, value);
+
+    if (changed || alwaysPublish)
+    {
+        publishMessage(mqtt_topic, value ? "Output 1" : "Output 0", true);
+    }
+}
+
 /***** Call back Method for Receiving MQTT messages and Switching LED ****/
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
@@ -268,31 +302,38 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         if (incommingMessage.equals("1") || incommingMessage.equals("trigger") )
         {
             //Serial.println("TRIGGER CONTROL!!!");
-            digitalWrite(output_pin, 1);
-            publishMessage(mqtt_topic, "Output 1", true);
+            SetOutput(1, true);
         }
         else
         {
           //Serial.println("RESET control");
-          digitalWrite(output_pin, 0);
-          publishMessage(mqtt_topic, "Output 0", true);
+          SetOutput(0, true);
         }
     }
 
 }
 
-// Returns true when the server answered with a 2xx status. The body is not
-// looked at, so any endpoint that accepts the request counts as a success; no
-// WiFi, a connection failure (negative httpCode) or a non-2xx status is a failure.
-bool MakeRequest(String url)
+// Returns true when the server answered with a 2xx status; no WiFi, a
+// connection failure (negative httpCode) or a non-2xx status is a failure.
+// A caller that cares what the server said passes a string for the body, which
+// is filled in on success and emptied on failure; passing nullptr skips reading
+// it. timeout bounds the connect and the read, so a server that accepts the
+// connection and then goes quiet cannot hold up the loop indefinitely.
+bool MakeRequest(String url, String* body, unsigned long timeout)
 {
     bool success = false;
+
+    if (body != nullptr)
+    {
+        *body = "";
+    }
 
     if (WiFi.status() == WL_CONNECTED) { //Check the current connection status
         ////Serial.println("WiFi is connected");
         WiFiClient wiFiClient;
         HTTPClient http;
 
+        http.setTimeout(timeout);
         http.begin(wiFiClient, url);
         ////Serial.print("Requesting:");
         ////Serial.println(url);
@@ -300,10 +341,22 @@ bool MakeRequest(String url)
 
         success = httpCode >= 200 && httpCode < 300;
 
+        if (success && body != nullptr)
+        {
+            *body = http.getString();
+        }
+
         http.end(); //Free the resources
     }
 
     return success;
+}
+
+// Fire-and-forget form, for the trigger and reset urls: any endpoint that
+// accepts the request counts as a success and the body is never read.
+bool MakeRequest(String url)
+{
+    return MakeRequest(url, nullptr, HTTPCLIENT_DEFAULT_TCP_TIMEOUT);
 }
 
 // Requests the url matching the current input level and restarts the repeat
@@ -338,6 +391,41 @@ void SendStateUrl()
     //Serial.println(inputValue ? "Requesting reset_url" : "Requesting trigger_url");
     lastUrlRequestFailed = !MakeRequest(url);
     urlRequestInterval = lastUrlRequestFailed ? URL_RETRY_INTERVAL : URL_REPEAT_INTERVAL;
+}
+
+// Asks the control url what the output should be doing and does what it says.
+// "Trigger" anywhere in the reply closes the relay and "Reset" opens it;
+// matching is case-insensitive and the rest of the body is ignored, so a page
+// carrying other text still works. A reply holding both words is taken as a
+// trigger. A reply holding neither, or a request that does not get through,
+// leaves the output where it is and the next poll tries again - unlike the
+// state urls, a failure here neither reboots the board nor drops the relay,
+// because the far end going quiet for a moment is not a command.
+void PollControlUrl()
+{
+    String body;
+    bool success = MakeRequest(control_url, &body, CONTROL_URL_TIMEOUT);
+
+    // Timed from the end of the request rather than the start, so a slow or
+    // timing-out server spaces the polls out instead of running them back to
+    // back.
+    lastControlUrlRequest = millis();
+
+    if (!success)
+    {
+        return;
+    }
+
+    body.toLowerCase();
+
+    if (body.indexOf("trigger") >= 0)
+    {
+        SetOutput(1, false);
+    }
+    else if (body.indexOf("reset") >= 0)
+    {
+        SetOutput(0, false);
+    }
 }
 
 /**** Method for Publishing MQTT Messages **********/
@@ -378,6 +466,7 @@ void setup() {
     custom_mqtt_control_topic.setValue(mqtt_control_topic, 31);
     custom_trigger_url.setValue(trigger_url, 63);
     custom_reset_url.setValue(reset_url, 63);
+    custom_control_url.setValue(control_url, 63);
 
     // add all your parameters here
     wm.addParameter(&custom_mqtt_server);
@@ -388,6 +477,7 @@ void setup() {
     wm.addParameter(&custom_mqtt_control_topic);
     wm.addParameter(&custom_trigger_url);
     wm.addParameter(&custom_reset_url);
+    wm.addParameter(&custom_control_url);
 
     // set custom html head content , inside <head>
     // examples of favicon, or meta tags etc
@@ -450,6 +540,11 @@ void setup() {
     // retry interval takes over until it gets through. The MQTT state is
     // published by reconnect() once the broker connection comes up.
     lastUrlRequest = millis() - URL_REPEAT_INTERVAL;
+
+    // Likewise poll the control url on the first pass, so a board that has just
+    // rebooted picks the output back up straight away rather than leaving it
+    // off for the first couple of seconds.
+    lastControlUrlRequest = millis() - CONTROL_URL_INTERVAL;
 }
 
 /******** Main Function *************/
@@ -496,6 +591,7 @@ void loop() {
         strcpy(mqtt_control_topic, custom_mqtt_control_topic.getValue());
         strcpy(trigger_url, custom_trigger_url.getValue());
         strcpy(reset_url, custom_reset_url.getValue());
+        strcpy(control_url, custom_control_url.getValue());
 
         SaveConfig();
         shouldSaveConfig = false;
@@ -533,6 +629,17 @@ void loop() {
             }
         }
         client.loop();
+    }
+
+    // A poll blocks for as long as the request takes, so it is held off while
+    // the config portal is up: an unreachable control url would otherwise stall
+    // the loop for most of every interval and leave the portal too sluggish to
+    // correct it with. Comparing the difference keeps this correct across the
+    // 49-day millis() rollover, as elsewhere in the loop.
+    if(strlen(control_url) > 0 && !wm.getConfigPortalActive() &&
+       millis() - lastControlUrlRequest >= CONTROL_URL_INTERVAL)
+    {
+        PollControlUrl();
     }
 
     //Serial.print(inputValue);
